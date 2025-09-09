@@ -264,6 +264,20 @@ if __name__ == '__main__':
     registration_envs()
     args = arguments.get_args()
     args.train.algo = args.train.algo.upper()
-    args.train.step_per_collect = args.train.num_processes * args.train.num_steps  
+    args.train.step_per_collect = args.train.num_processes * args.train.num_steps 
+
+    args.env.box_type = "random" 
+
+    args.env.box_size_set = [
+    (2, 2, 2),
+    (2, 3, 4),
+    (3, 3, 2),
+    (4, 2, 2),
+    (5, 3, 2),
+    (3, 5, 4),
+    (6, 2, 3),
+    ]
+
+    args.env.box_big = max(max(w, l, h) for (w, l, h) in args.env.box_size_set)
 
     train(args)
