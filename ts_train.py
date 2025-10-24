@@ -18,16 +18,11 @@ import shutil
 import random
 
 import numpy as np
-import gymnasium as gym
+
 import torch
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import LambdaLR, ExponentialLR
-import tianshou as ts
-from tianshou.utils import TensorboardLogger, LazyLogger
-from tianshou.data import VectorReplayBuffer
-from tianshou.utils.net.common import ActorCritic, DataParallelNet
-from tianshou.trainer import onpolicy_trainer
 
 import model
 import arguments
@@ -35,36 +30,51 @@ from tools import *
 from masked_ppo import MaskedPPOPolicy
 from masked_a2c import MaskedA2CPolicy
 from mycollector import PackCollector
+
+from tianshou.utils import TensorboardLogger, LazyLogger
+from tianshou.data import VectorReplayBuffer
+from tianshou.utils.net.common import ActorCritic, DataParallelNet
+from tianshou.trainer import onpolicy_trainer
+
+import gymnasium as gym
+
+
  
 
 def make_envs(args):
+    import tianshou as ts
 
-    train_envs = ts.env.SubprocVectorEnv(
-        [lambda: gym.make(args.env.id, 
-                          container_size=args.env.container_size,
-                          enable_rotation=args.env.rot,
-                          data_type=args.env.box_type,
-                          item_set=args.env.box_size_set, 
-                          reward_type=args.train.reward_type,
-                          action_scheme=args.env.scheme,
-                          k_placement=args.env.k_placement) 
-                          for _ in range(args.train.num_processes)]
-    )
-    test_envs = ts.env.SubprocVectorEnv(
-        [lambda: gym.make(args.env.id, 
-                          container_size=args.env.container_size,
-                          enable_rotation=args.env.rot,
-                          data_type=args.env.box_type,
-                          item_set=args.env.box_size_set, 
-                          reward_type=args.train.reward_type,
-                          action_scheme=args.env.scheme,
-                          k_placement=args.env.k_placement) 
-                          for _ in range(1)]
-    )
+    # Make sure we use the correct registered id
+    # (tools.registration_envs() registers "OnlinePack-v1")
+    if getattr(args.env, "id", None) != "OnlinePack-v1":
+        args.env.id = "OnlinePack-v1"
+
+    def _make_thunk():
+        def _thunk():
+            # IMPORTANT on Windows: register the custom env inside each subprocess
+            registration_envs()
+            env = gym.make(
+                args.env.id,
+                container_size=args.env.container_size,
+                enable_rotation=args.env.rot,
+                data_type=args.env.box_type,
+                item_set=args.env.box_size_set,
+                reward_type=args.train.reward_type,
+                action_scheme=args.env.scheme,
+                k_placement=args.env.k_placement,
+            )
+            return env
+        return _thunk
+
+    train_envs = ts.env.SubprocVectorEnv([_make_thunk() for _ in range(args.train.num_processes)])
+    test_envs  = ts.env.SubprocVectorEnv([_make_thunk() for _ in range(1)])
+    # train_envs = ts.env.DummyVectorEnv([_make_thunk()])  # <-- single process
+    # test_envs  = ts.env.DummyVectorEnv([_make_thunk()])
+
     train_envs.seed(args.seed)
     test_envs.seed(args.seed)
-
     return train_envs, test_envs
+
 
 
 def build_net(args, device):
@@ -261,6 +271,7 @@ def train(args):
 
 
 if __name__ == '__main__':
+
     registration_envs()
     args = arguments.get_args()
     args.train.algo = args.train.algo.upper()
@@ -278,6 +289,8 @@ if __name__ == '__main__':
     (6, 2, 3),
     ]
 
-    args.env.box_big = max(max(w, l, h) for (w, l, h) in args.env.box_size_set)
+    # args.train.num_processes = 1
 
+    args.env.box_big = max(max(w, l, h) for (w, l, h) in args.env.box_size_set)
+    print(args.env.id)
     train(args)

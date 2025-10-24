@@ -66,6 +66,8 @@ class PackingEnv(gym.Env):
         
         self._set_space()
 
+        self._override_next = None  
+
     def _set_space(self) -> None:
         obs_len = self.area + 3  # the state of bin + the dimension of box (l, w, h)
         obs_len += self.k_placement * 6
@@ -115,7 +117,19 @@ class PackingEnv(gym.Env):
 
     @property
     def next_box(self) -> list:
-        return self.box_creator.preview(1)[0]
+        # If API forced a specific current box, use it
+        if self._override_next is not None:
+            return list(self._override_next)
+
+        # Otherwise rely on the creator's queue (API may have injected one)
+        prev = self.box_creator.preview(1)
+        if prev:                       # non-empty queue → use it
+            return prev[0]
+
+        # No forced box and no queued box: API mode expects client to set it
+        raise RuntimeError(
+            "No current box available. In API mode, call override_current(...) before reading next_box."
+        )
 
     def get_possible_position(self, next_box):
         """
@@ -140,7 +154,7 @@ class PackingEnv(gym.Env):
         return candidates, mask 
 
     def idx2pos(self, idx):
-        if idx >= self.k_placement - 1:
+        if idx >= self.k_placement:# - 1:
             idx = idx - self.k_placement
             rot = 1
         else:
@@ -157,50 +171,89 @@ class PackingEnv(gym.Env):
         return pos, rot, dim
 
     def step(self, action):
-        """
-
-        :param action: action index
-        :return: cur_observation
-                 reward
-                 done, Whether to end boxing (i.e., the current box cannot fit in the bin)
-                 info
-        """
-        # print(self.next_box)
         pos, rot, size = self.idx2pos(action)
- 
         succeeded = self.container.place_box(self.next_box, pos, rot)
-        
+
         if not succeeded:
-            if self.reward_type == "terminal":  # Terminal reward
-                reward = self.container.get_volume_ratio()
-            else:  # Step-wise/Immediate reward
-                reward = 0.0
+            reward = self.container.get_volume_ratio() if self.reward_type == "terminal" else 0.0
             done = True
-            
             self.render_box = [[0, 0, 0], [0, 0, 0]]
             info = {'counter': len(self.container.boxes), 'ratio': self.container.get_volume_ratio()}
             return self.cur_observation, reward, done, False, info
 
         box_ratio = self.get_box_ratio()
 
-        self.box_creator.drop_box()  # remove current box from the list
-        self.box_creator.generate_box_size()  # add a new box to the list
+        # Consume any queued current box (if any)
+        try:
+            self.box_creator.drop_box()
+        except Exception:
+            pass
 
-        if self.reward_type == "terminal":
-            reward = 0.01
-        else:
-            reward = box_ratio
+        # ✅ Only auto-generate for training mode
+        if getattr(self.box_creator, "autofill", False):
+            self.box_creator.generate_box_size()
+
+        # ✅ Clear forced override after a successful placement
+        self._override_next = None
+
+        reward = 0.01 if self.reward_type == "terminal" else box_ratio
         done = False
         info = {'counter': len(self.container.boxes), 'ratio': self.container.get_volume_ratio()}
-
         return self.cur_observation, reward, done, False, info
+
+    def idx2pos_for(self, idx, size):
+        if idx >= self.k_placement:
+            idx -= self.k_placement
+            rot = 1
+        else:
+            rot = 0
+
+        pos = self.candidates[idx][:3]
+        dim = [size[1], size[0], size[2]] if rot == 1 else list(size)
+        self.render_box = [dim, pos]
+        return pos, rot, dim
+
+    def step_with_box(self, action, size):
+        pos, rot, dim = self.idx2pos_for(action, size)
+        succeeded = self.container.place_box(size, pos, rot)
+
+        if not succeeded:
+            reward = self.container.get_volume_ratio() if self.reward_type == "terminal" else 0.0
+            done = True
+            self.render_box = [[0, 0, 0], [0, 0, 0]]
+            info = {'counter': len(self.container.boxes), 'ratio': self.container.get_volume_ratio()}
+            return self.cur_observation, reward, done, False, info
+
+        box_ratio = (size[0]*size[1]*size[2])/(self.container.dimension[0]*self.container.dimension[1]*self.container.dimension[2])
+
+        # Consume queued item if present (safe in API mode)
+        try:
+            self.box_creator.drop_box()
+        except Exception:
+            pass
+
+        if getattr(self.box_creator, "autofill", False):
+            self.box_creator.generate_box_size()
+
+        self._override_next = None
+
+        reward = 0.01 if self.reward_type == "terminal" else box_ratio
+        done = False
+        info = {'counter': len(self.container.boxes), 'ratio': self.container.get_volume_ratio()}
+        return self.cur_observation, reward, done, False, info
+
 
     def reset(self, seed: Optional[int] = None):
         super().reset(seed=seed)
         self.box_creator.reset()
-        self.container = Container(*self.bin_size)
-        self.box_creator.generate_box_size()
+        self.container = Container(*self.bin_size, rotation=self.can_rotate)
+        # self._override_next = None
         self.candidates = np.zeros_like(self.candidates)
+
+        # Only auto-generate in training mode (autofill==True)
+        if getattr(self.box_creator, "autofill", False):
+            self.box_creator.generate_box_size()
+
         return self.cur_observation, {}
     
     def seed(self, s=None):

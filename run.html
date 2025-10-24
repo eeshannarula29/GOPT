@@ -1,0 +1,129 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+</head>
+<body>
+
+<select id="boxSel">
+  <option value="2,2,2">2×2×2</option>
+  <option value="2,3,4">2×3×4</option>
+  <option value="3,3,2">3×3×2</option>
+  <option value="4,2,2">4×2×2</option>
+  <option value="5,3,2">5×3×2</option>
+  <option value="3,5,4">3×5×4</option>
+  <option value="6,2,3">6×2×3</option>
+</select>
+<button id="start">Start</button>
+<button id="place">Place</button>
+
+<script>
+let SESSION_ID = null;
+let boxes = [];
+const binSize = [10,10,10];
+
+document.getElementById("start").onclick = startSession;
+document.getElementById("place").onclick = () => {
+  const parts = document.getElementById("boxSel").value.split(",").map(s => +s.trim());
+  const [w, l, h] = parts;
+  placeBox(w, l, h);
+};
+
+async function startSession() {
+  const res = await fetch("http://127.0.0.1:8000/session/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      container_size: [10, 10, 10],
+      scheme: "EMS",
+      rot: true,
+      k_placement: 80,
+      box_size_set: [[2,2,2],[2,3,4],[3,3,2],[4,2,2],[5,3,2],[3,5,4],[6,2,3]],
+      ckp: "C:/Users/eesha/Documents/Projects/shipment_sw_dev/GOPT/GOPT/logs/OnlinePack-v1_10-10-10_EMS_40_random_PPO_seed5_Adam_2025.09.21-13-29-33/policy_step_best.pth"
+    })
+  });
+  if (!res.ok) {
+    console.error("start error:", res.status, await res.text());
+    return;
+  }
+  const data = await res.json();
+  SESSION_ID = data.session_id;
+  boxes = data.boxes || [];
+  console.log("started session", SESSION_ID);
+}
+
+async function placeBox(w, l, h) {
+  if (!SESSION_ID) { console.error("No session — click Start first"); return; }
+  const res = await fetch("http://127.0.0.1:8000/place", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: SESSION_ID, box: [w, l, h] })
+  });
+  const txt = await res.text();
+  if (!res.ok) { console.error("place error:", res.status, txt); return; }
+  const data = JSON.parse(txt);
+  console.log("place resp:", data);
+
+  if (Array.isArray(data.boxes) && data.boxes.length > 0) {
+    boxes = data.boxes; // server provided full list
+  } else {
+    boxes.push({ dim: data.placed_dim, pos: data.pos });
+  }
+}
+
+function setup() {
+  createCanvas(800, 600, WEBGL);
+  colorMode(HSB, 360, 100, 100); // allow hue cycling
+}
+
+function draw() {
+  background(245);
+  orbitControl();
+  scale(20);
+
+  // lights
+  ambientLight(128);
+  directionalLight(255, 255, 255, 0.5, 0.5, -1);
+
+  // container wireframe
+  stroke(60); // softer than pure black
+  noFill();
+  push();
+    box(binSize[0], binSize[1], binSize[2]);
+  pop();
+
+  // floor on XZ at bottom (y = -binSize[1]/2)
+  noStroke();
+  push();
+    translate(0, -0.5 * binSize[1], 0);
+    rotateX(HALF_PI);                // XY plane -> XZ plane
+    ambientMaterial(210, 15, 95);    // HSB: bluish floor (low saturation)
+    plane(binSize[0], binSize[2]);   // width=X, height=Z
+  pop();
+
+  // placed boxes — each with a distinct hue
+  for (let i = 0; i < boxes.length; i++) {
+    const b = boxes[i];
+    const [w,l,h] = b.dim;
+    const [x,y,z] = b.pos;
+
+    // env corner coords -> p5 centered coords
+    const cx = -0.5*binSize[0] + 0.5*w + x;
+    const cy = -0.5*binSize[1] + 0.5*l + y;
+    const cz = -0.5*binSize[2] + 0.5*h + z;
+
+    // cycle hue by index; 47 gives a nice spread
+    const hue = (i * 47) % 360;
+
+    push();
+      translate(cx, cy, cz);
+      // use ambientMaterial so colors show with lighting
+      ambientMaterial(hue, 70, 95);  // vivid colored boxes
+      box(w, l, h);
+    pop();
+  }
+}
+</script>
+</body>
+</html>

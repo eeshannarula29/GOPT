@@ -213,12 +213,45 @@ class VTKRender:
         writer.SetInputConnection(window_to_image_filter.GetOutputPort())
         writer.Write()
 
-
 if __name__ == "__main__":
-    render = VTKRender([10, 10, 10])
+    render = VTKRender([10, 10, 10], auto_render=True)
 
+    # add everything you want to see
     render.add_item([2, 3, 2], [0, 0, 0])
-    render.hold_on()
     render.add_item([1, 1, 1], [2, 0, 0])
 
-    render.hold_on()
+    # then start the event loop once; window is interactive now
+    render.hold_on()  # blocks until you close the window
+
+# if __name__ == "__main__":
+#     render = VTKRender([10, 10, 10])
+
+#     render.add_item([2, 3, 2], [0, 0, 0])
+#     render.hold_on()
+#     render.add_item([1, 1, 1], [2, 0, 0])
+
+#     render.hold_on()
+
+# # add this method to VTKRender
+# def start_stream(self, items, interval_ms=500):
+#     self._stream_items = list(items)
+
+#     def on_timer(obj, event):
+#         if not self._stream_items:
+#             obj.DestroyTimer(self._timer_id)
+#             return
+#         size, pos = self._stream_items.pop(0)
+#         self.add_item(size, pos)
+
+#     self._timer_id = self.interactor.CreateRepeatingTimer(interval_ms)
+#     self.interactor.AddObserver("TimerEvent", on_timer)
+#     self.interactor.Start()
+
+# # usage
+# if __name__ == "__main__":
+#     render = VTKRender([10, 10, 10], offscreen=False, auto_render=True)
+#     render.start_stream([
+#         ([2, 3, 2], [0, 0, 0]),
+#         ([1, 1, 1], [2, 0, 0]),
+#         # add more (size, pos) pairs here…
+#     ], interval_ms=500)

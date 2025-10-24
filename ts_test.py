@@ -5,6 +5,7 @@ parent_path = os.path.dirname(curr_path)
 sys.path.append(parent_path) 
 
 import random 
+import time
 
 import gymnasium as gym
 import torch
@@ -92,7 +93,7 @@ if __name__ == '__main__':
     if args.render:
         args.test_episode = 1  # for visualization
 
-    args.seed = 5
+    args.seed = int(time.time())
 
     args.env.box_type = "random"
     args.env.box_size_set = [

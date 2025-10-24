@@ -11,15 +11,15 @@ env:
   box_type: random              # random, cut
   container_size: [10, 10, 10]
   step:           
-  k_placement: 80              # number of candidate placements
+  k_placement: 40              # number of candidate placements
   
 
 train:
   algo: PPO
   clip_param: 0.3
-  num_processes: 128    # the number of subprogresses, if debug, set to 1
-  num_steps: 5
-  epoch: 1000
+  num_processes: 8    # the number of subprogresses, if debug, set to 1
+  num_steps: 64
+  epoch: 200
   last_epoch: 200  
   batch_size: 128  
   step_per_epoch: 40000        # 2**15
