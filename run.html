@@ -2,35 +2,118 @@
 <html>
 <head>
   <meta charset="utf-8" />
+  <title>3D Packing – Online & Offline</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; display: grid; grid-template-columns: 360px 1fr; height: 100vh; }
+    aside { padding: 16px; border-right: 1px solid #eee; overflow: auto; }
+    main { position: relative; }
+    h3 { margin: 12px 0 8px; }
+    small { color: #666; }
+    .row { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+    input[type="number"] { width: 70px; padding: 4px 6px; }
+    input[type="text"] { width: 120px; padding: 4px 6px; }
+    button { padding: 6px 10px; cursor: pointer; }
+    table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+    th, td { padding: 4px 6px; border-bottom: 1px dashed #ddd; text-align: left; }
+    .muted { color: #888; }
+    .ok { color: #1a7f37; }
+    .err { color: #b42318; }
+    .chip { display:inline-block; padding:2px 6px; border-radius: 10px; background:#f3f4f6; margin-left:6px; font-size:12px; }
+    .stack { display:flex; gap:6px; flex-wrap:wrap; }
+    .divider { height: 1px; background: #eee; margin: 12px 0; }
+  </style>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
 </head>
 <body>
+  <aside>
+    <h3>Online (RL)</h3>
+    <div class="row">
+      <select id="boxSel">
+        <option value="2,2,2">2×2×2</option>
+        <option value="2,3,4">2×3×4</option>
+        <option value="3,3,2">3×3×2</option>
+        <option value="4,2,2">4×2×2</option>
+        <option value="5,3,2">5×3×2</option>
+        <option value="3,5,4">3×5×4</option>
+        <option value="6,2,3">6×2×3</option>
+      </select>
+    </div>
+    <div class="stack">
+      <button id="start">Start Session</button>
+      <button id="place">Place Box</button>
+    </div>
+    <div class="divider"></div>
 
-<select id="boxSel">
-  <option value="2,2,2">2×2×2</option>
-  <option value="2,3,4">2×3×4</option>
-  <option value="3,3,2">3×3×2</option>
-  <option value="4,2,2">4×2×2</option>
-  <option value="5,3,2">5×3×2</option>
-  <option value="3,5,4">3×5×4</option>
-  <option value="6,2,3">6×2×3</option>
-</select>
-<button id="start">Start</button>
-<button id="place">Place</button>
+    <h3>Offline (GA / COHLA)</h3>
+    <small>Add boxes then run “Offline Pack”.</small>
+
+    <table id="boxesTbl">
+      <thead>
+        <tr><th>id</th><th>W</th><th>L</th><th>H</th><th>cnt</th><th>upright</th><th></th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div class="stack">
+      <input id="newId" type="text" placeholder="id" />
+      <input id="newW" type="number" value="2" min="1" />
+      <input id="newL" type="number" value="2" min="1" />
+      <input id="newH" type="number" value="2" min="1" />
+      <input id="newCnt" type="number" value="1" min="1" />
+      <label><input id="newUpright" type="checkbox" /> upright</label>
+      <button id="addRow">Add</button>
+    </div>
+
+    <div class="row">
+      <label>Bin Size:&nbsp;</label>
+      <input id="binW" type="number" value="10" min="1" />
+      <input id="binL" type="number" value="10" min="1" />
+      <input id="binH" type="number" value="10" min="1" />
+    </div>
+    <div class="row">
+      <label><input id="useGA" type="checkbox" checked/> use GA</label>
+      <span class="chip" title="Population × Generations">pop 120 × iters 200</span>
+    </div>
+    <div class="stack">
+      <button id="runOffline">Offline Pack</button>
+      <button id="clearOffline">Clear Offline</button>
+    </div>
+
+    <div class="divider"></div>
+    <div class="row">
+      <label for="binIdx">View Bin:</label>
+      <select id="binIdx"></select>
+      <span id="binInfo" class="muted"></span>
+    </div>
+    <div id="status" class="muted" style="margin-top:8px;"></div>
+  </aside>
+
+  <main>
+    <!-- p5 canvas mounts here -->
+  </main>
 
 <script>
-let SESSION_ID = null;
-let boxes = [];
-const binSize = [10,10,10];
+/** ------------------ Shared state ------------------ **/
+let SESSION_ID = null;        // online session id
+let onlineBoxes = [];         // boxes from RL (/place)
+const binSizeOnline = [10,10,10];
 
-document.getElementById("start").onclick = startSession;
-document.getElementById("place").onclick = () => {
-  const parts = document.getElementById("boxSel").value.split(",").map(s => +s.trim());
-  const [w, l, h] = parts;
-  placeBox(w, l, h);
+let offlineBins = [];         // result of /offline/pack: [{boxes:[{dim,pos,rot,id}], filled_ratio}, ...]
+let activeView = 'online';    // 'online' | 'offline'
+let selectedBin = 0;          // which offline bin to view
+let p5Ready = false;
+
+const $ = sel => document.querySelector(sel);
+const $$ = sel => Array.from(document.querySelectorAll(sel));
+
+/** --------------- Online (RL) handlers --------------- **/
+$('#start').onclick = startSession;
+$('#place').onclick = () => {
+  const parts = $('#boxSel').value.split(',').map(s => +s.trim());
+  placeBox(parts[0], parts[1], parts[2]);
 };
 
 async function startSession() {
+  setStatus('Starting RL session…');
   const res = await fetch("http://127.0.0.1:8000/session/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -40,44 +123,183 @@ async function startSession() {
       rot: true,
       k_placement: 80,
       box_size_set: [[2,2,2],[2,3,4],[3,3,2],[4,2,2],[5,3,2],[3,5,4],[6,2,3]],
-      ckp: "C:/Users/eesha/Documents/Projects/shipment_sw_dev/GOPT/GOPT/logs/OnlinePack-v1_10-10-10_EMS_40_random_PPO_seed5_Adam_2025.09.21-13-29-33/policy_step_best.pth"
+      ckp: "/Users/eeshannarula/Documents/Projects/shimpment/GOPT/logs/model_best/policy_step_best.pth"
     })
   });
   if (!res.ok) {
-    console.error("start error:", res.status, await res.text());
+    const t = await res.text();
+    setStatus(`start error ${res.status}: ${t}`, true);
     return;
   }
   const data = await res.json();
   SESSION_ID = data.session_id;
-  boxes = data.boxes || [];
-  console.log("started session", SESSION_ID);
+  onlineBoxes = data.boxes || [];
+  activeView = 'online';
+  setStatus(`RL session started. Boxes: ${onlineBoxes.length}.`);
 }
 
 async function placeBox(w, l, h) {
-  if (!SESSION_ID) { console.error("No session — click Start first"); return; }
+  if (!SESSION_ID) { setStatus('No RL session — click Start first', true); return; }
   const res = await fetch("http://127.0.0.1:8000/place", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: SESSION_ID, box: [w, l, h] })
   });
   const txt = await res.text();
-  if (!res.ok) { console.error("place error:", res.status, txt); return; }
+  if (!res.ok) { setStatus(`place error ${res.status}: ${txt}`, true); return; }
   const data = JSON.parse(txt);
-  console.log("place resp:", data);
-
   if (Array.isArray(data.boxes) && data.boxes.length > 0) {
-    boxes = data.boxes; // server provided full list
+    onlineBoxes = data.boxes;
   } else {
-    boxes.push({ dim: data.placed_dim, pos: data.pos });
+    onlineBoxes.push({ dim: data.placed_dim, pos: data.pos });
   }
+  activeView = 'online';
+  setStatus(`Placed [${w},${l},${h}] via RL. Fill ${(data.filled_ratio*100).toFixed(1)}%`);
 }
 
+/** --------------- Offline (GA) UI & calls --------------- **/
+$('#addRow').onclick = addRow;
+$('#runOffline').onclick = runOffline;
+$('#clearOffline').onclick = () => {
+  offlineBins = []; selectedBin = 0; refreshBinSelector(); setStatus('Cleared offline result.');
+};
+
+function addRow() {
+  const id = $('#newId').value.trim() || `box_${Date.now()%10000}`;
+  const w  = Math.max(1, +$('#newW').value|0);
+  const l  = Math.max(1, +$('#newL').value|0);
+  const h  = Math.max(1, +$('#newH').value|0);
+  const c  = Math.max(1, +$('#newCnt').value|0);
+  const u  = $('#newUpright').checked;
+
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td>${id}</td>
+    <td>${w}</td>
+    <td>${l}</td>
+    <td>${h}</td>
+    <td>${c}</td>
+    <td>${u ? 'yes' : 'no'}</td>
+    <td><button class="del">×</button></td>
+  `;
+  $('#boxesTbl tbody').appendChild(tr);
+  tr.querySelector('.del').onclick = () => tr.remove();
+  $('#newId').value = '';
+}
+
+function readOfflineItems() {
+  const rows = $$('#boxesTbl tbody tr');
+  const items = [];
+  for (const r of rows) {
+    const tds = r.querySelectorAll('td');
+    items.push({
+      id: tds[0].textContent.trim(),
+      dim: [ +tds[1].textContent, +tds[2].textContent, +tds[3].textContent ],
+      count: +tds[4].textContent,
+      weight: 1.0,
+      must_upright: tds[5].textContent.trim().toLowerCase().startsWith('y')
+    });
+  }
+  return items;
+}
+
+async function runOffline() {
+  const binW = Math.max(1, +$('#binW').value|0);
+  const binL = Math.max(1, +$('#binL').value|0);
+  const binH = Math.max(1, +$('#binH').value|0);
+  const items = readOfflineItems();
+  if (!items.length) { setStatus('Add at least one row in the box table.', true); return; }
+
+  const useGA = $('#useGA').checked;
+
+  const payload = {
+    bin_size: [binW, binL, binH],
+    max_load: null,
+    use_ga: useGA,
+    pop_size: 120,
+    iters: 200,
+    cx_prob: 0.75,
+    mut_prob: 0.15,
+    tabu_len: 100,
+    items
+    // Optional: cog_window_x / cog_window_y
+    // cog_window_x: [0.2, 0.8],
+    // cog_window_y: [0.2, 0.8]
+  };
+
+  setStatus('Running offline pack…');
+  const res = await fetch("http://127.0.0.1:8000/offline/pack", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  const txt = await res.text();
+  if (!res.ok) { setStatus(`offline error ${res.status}: ${txt}`, true); return; }
+
+  const data = JSON.parse(txt);
+  // data.bins: [{boxes:[{id,dim,pos,rot}], filled_ratio}, ...]
+  offlineBins = (data.bins || []).map(b => ({
+    boxes: b.boxes || [],
+    filled_ratio: b.filled_ratio ?? 0
+  }));
+  selectedBin = 0;
+  activeView = 'offline';
+  refreshBinSelector();
+  setStatus(`Offline packed ${items.length} items into ${offlineBins.length} bin(s).`);
+}
+
+function refreshBinSelector() {
+  const sel = $('#binIdx');
+  sel.innerHTML = '';
+  if (!offlineBins.length) {
+    sel.disabled = true; $('#binInfo').textContent = '';
+    return;
+  }
+  sel.disabled = false;
+  offlineBins.forEach((b, i) => {
+    const opt = document.createElement('option');
+    opt.value = i; opt.textContent = `Bin ${i+1}`;
+    sel.appendChild(opt);
+  });
+  sel.value = String(selectedBin);
+  updateBinInfo();
+}
+
+$('#binIdx').onchange = () => {
+  selectedBin = +$('#binIdx').value;
+  activeView = 'offline';
+  updateBinInfo();
+};
+
+function updateBinInfo() {
+  if (!offlineBins.length) { $('#binInfo').textContent = ''; return; }
+  const b = offlineBins[selectedBin];
+  $('#binInfo').innerHTML = `boxes: ${b.boxes.length} <span class="chip">${(b.filled_ratio*100).toFixed(1)}% full</span>`;
+}
+
+/** --------------- Status helper --------------- **/
+function setStatus(msg, isErr=false) {
+  const el = $('#status');
+  el.textContent = msg;
+  el.className = isErr ? 'err' : 'muted';
+}
+
+/** --------------- p5 renderer --------------- **/
+let binSize = [10,10,10];   // dynamic based on view
+
 function setup() {
-  createCanvas(800, 600, WEBGL);
-  colorMode(HSB, 360, 100, 100); // allow hue cycling
+  const c = createCanvas(window.innerWidth - 360, window.innerHeight, WEBGL);
+  c.parent(document.querySelector('main'));
+  colorMode(HSB, 360, 100, 100);
+  p5Ready = true;
+}
+
+function windowResized() {
+  resizeCanvas(window.innerWidth - 360, window.innerHeight);
 }
 
 function draw() {
+  if (!p5Ready) return;
   background(245);
   orbitControl();
   scale(20);
@@ -86,40 +308,47 @@ function draw() {
   ambientLight(128);
   directionalLight(255, 255, 255, 0.5, 0.5, -1);
 
+  // figure out which boxes to show
+  let drawBoxes = [];
+  if (activeView === 'online') {
+    binSize = binSizeOnline.slice();
+    drawBoxes = onlineBoxes;
+  } else {
+    // offline
+    const b = offlineBins[selectedBin] || {boxes:[]};
+    drawBoxes = b.boxes.map(x => ({ dim: x.dim, pos: x.pos })); // same shape
+    // bin size = user selection in side panel
+    binSize = [ +$('#binW').value, +$('#binL').value, +$('#binH').value ];
+  }
+
   // container wireframe
-  stroke(60); // softer than pure black
-  noFill();
-  push();
-    box(binSize[0], binSize[1], binSize[2]);
-  pop();
+  stroke(60); noFill();
+  push(); box(binSize[0], binSize[1], binSize[2]); pop();
 
   // floor on XZ at bottom (y = -binSize[1]/2)
   noStroke();
   push();
     translate(0, -0.5 * binSize[1], 0);
-    rotateX(HALF_PI);                // XY plane -> XZ plane
-    ambientMaterial(210, 15, 95);    // HSB: bluish floor (low saturation)
-    plane(binSize[0], binSize[2]);   // width=X, height=Z
+    rotateX(HALF_PI);
+    ambientMaterial(210, 15, 95);
+    plane(binSize[0], binSize[2]);
   pop();
 
-  // placed boxes — each with a distinct hue
-  for (let i = 0; i < boxes.length; i++) {
-    const b = boxes[i];
+  // placed boxes — each with distinct hue
+  for (let i = 0; i < drawBoxes.length; i++) {
+    const b = drawBoxes[i];
     const [w,l,h] = b.dim;
     const [x,y,z] = b.pos;
 
-    // env corner coords -> p5 centered coords
     const cx = -0.5*binSize[0] + 0.5*w + x;
     const cy = -0.5*binSize[1] + 0.5*l + y;
     const cz = -0.5*binSize[2] + 0.5*h + z;
 
-    // cycle hue by index; 47 gives a nice spread
     const hue = (i * 47) % 360;
 
     push();
       translate(cx, cy, cz);
-      // use ambientMaterial so colors show with lighting
-      ambientMaterial(hue, 70, 95);  // vivid colored boxes
+      ambientMaterial(hue, 70, 95);
       box(w, l, h);
     pop();
   }
