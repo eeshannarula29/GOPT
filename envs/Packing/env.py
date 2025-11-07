@@ -25,6 +25,7 @@ class PackingEnv(gym.Env):
         k_placement=100,
         is_render=False,
         is_hold_on=False,
+        support_threshold: float = 1.0,
         **kwags
     ) -> None:
         self.bin_size = container_size
@@ -67,6 +68,17 @@ class PackingEnv(gym.Env):
         self._set_space()
 
         self._override_next = None  
+        self._override_lock = False
+        self.api_mode = False  
+
+    def force_next_box(self, size):
+        """Authoritative setter used by the API server."""
+        size = [int(size[0]), int(size[1]), int(size[2])]
+        self._override_next = size
+        self._override_lock = True
+        # keep the queue in sync, but override takes precedence
+        if hasattr(self, "box_creator") and hasattr(self.box_creator, "override_current"):
+            self.box_creator.override_current(size)
 
     def _set_space(self) -> None:
         obs_len = self.area + 3  # the state of bin + the dimension of box (l, w, h)
@@ -117,19 +129,15 @@ class PackingEnv(gym.Env):
 
     @property
     def next_box(self) -> list:
-        # If API forced a specific current box, use it
-        if self._override_next is not None:
+        if self._override_next is not None and self._override_lock:
             return list(self._override_next)
-
-        # Otherwise rely on the creator's queue (API may have injected one)
-        prev = self.box_creator.preview(1)
-        if prev:                       # non-empty queue → use it
-            return prev[0]
-
-        # No forced box and no queued box: API mode expects client to set it
-        raise RuntimeError(
-            "No current box available. In API mode, call override_current(...) before reading next_box."
-        )
+        
+        prev = self.box_creator.preview(1) or []
+        if prev:
+            return list(prev[0])
+        if self.api_mode:
+            raise RuntimeError("No current box; call force_next_box(...) first.")
+        raise RuntimeError("No current box available.")
 
     def get_possible_position(self, next_box):
         """
@@ -154,7 +162,7 @@ class PackingEnv(gym.Env):
         return candidates, mask 
 
     def idx2pos(self, idx):
-        if idx >= self.k_placement:# - 1:
+        if idx >= self.k_placement - 1:
             idx = idx - self.k_placement
             rot = 1
         else:
@@ -195,6 +203,7 @@ class PackingEnv(gym.Env):
 
         # ✅ Clear forced override after a successful placement
         self._override_next = None
+        self._override_lock = False
 
         reward = 0.01 if self.reward_type == "terminal" else box_ratio
         done = False
@@ -202,7 +211,7 @@ class PackingEnv(gym.Env):
         return self.cur_observation, reward, done, False, info
 
     def idx2pos_for(self, idx, size):
-        if idx >= self.k_placement:
+        if idx >= self.k_placement - 1:
             idx -= self.k_placement
             rot = 1
         else:
@@ -236,6 +245,7 @@ class PackingEnv(gym.Env):
             self.box_creator.generate_box_size()
 
         self._override_next = None
+        self._override_lock = False
 
         reward = 0.01 if self.reward_type == "terminal" else box_ratio
         done = False
@@ -243,17 +253,27 @@ class PackingEnv(gym.Env):
         return self.cur_observation, reward, done, False, info
 
 
-    def reset(self, seed: Optional[int] = None):
+    def reset(self, seed: Optional[int] = None, defer_box: bool = False):
         super().reset(seed=seed)
         self.box_creator.reset()
         self.container = Container(*self.bin_size, rotation=self.can_rotate)
-        # self._override_next = None
         self.candidates = np.zeros_like(self.candidates)
 
-        # Only auto-generate in training mode (autofill==True)
+        # Do NOT clear _override_next here; server will set it later via force_next_box()
+        # self._override_next stays whatever the server sets later
+        # self._override_lock stays False until server calls force_next_box()
+
+        # In API mode (or if explicitly deferred), don't touch next_box
+        if self.api_mode or defer_box:
+            obs_len  = self.observation_space["obs"].shape[0]
+            mask_len = self.k_placement * 2  # if you use 2 halves; else self.k_placement
+            obs = {"obs": np.zeros((obs_len,), dtype=np.float32),
+                "mask": np.zeros((mask_len,), dtype=np.float32)}
+            return obs, {}
+
+        # Training path:
         if getattr(self.box_creator, "autofill", False):
             self.box_creator.generate_box_size()
-
         return self.cur_observation, {}
     
     def seed(self, s=None):

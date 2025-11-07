@@ -40,7 +40,7 @@ async function startSession() {
       rot: true,
       k_placement: 80,
       box_size_set: [[2,2,2],[2,3,4],[3,3,2],[4,2,2],[5,3,2],[3,5,4],[6,2,3]],
-      ckp: "C:/Users/eesha/Documents/Projects/shipment_sw_dev/GOPT/GOPT/logs/OnlinePack-v1_10-10-10_EMS_40_random_PPO_seed5_Adam_2025.09.21-13-29-33/policy_step_best.pth"
+      ckp: "/Users/eeshannarula/Documents/Projects/shimpment/GOPT/logs/model_best/policy_step_best.pth"
     })
   });
   if (!res.ok) {
@@ -64,6 +64,26 @@ async function placeBox(w, l, h) {
   if (!res.ok) { console.error("place error:", res.status, txt); return; }
   const data = JSON.parse(txt);
   console.log("place resp:", data);
+  
+  // ✅ replace (not stack) the heightmap image
+  const hmap = document.getElementById("hmap");
+  if (data.debug_hmap_png) {
+    hmap.src = "data:image/png;base64," + data.debug_hmap_png;
+    hmap.alt = "Heightmap";
+    hmap.style.display = "";            // show it
+  } else {
+    hmap.style.display = "none";        // hide if none returned
+  }
+  console.log('has ems png?', !!data.debug_ems_png, data.debug_ems_png?.slice(0,40));
+  // after parsing `data`
+  const ems = document.getElementById("emsView");
+  if (data.debug_ems_png) {
+    ems.src = "data:image/png;base64," + data.debug_ems_png;
+    ems.alt = "EMS candidates";
+    ems.style.display = "";     // <- SHOW IT
+  } else {
+    ems.style.display = "none"; // <- HIDE IF MISSING
+  }
 
   if (Array.isArray(data.boxes) && data.boxes.length > 0) {
     boxes = data.boxes; // server provided full list
@@ -86,44 +106,59 @@ function draw() {
   ambientLight(128);
   directionalLight(255, 255, 255, 0.5, 0.5, -1);
 
-  // container wireframe
-  stroke(60); // softer than pure black
+  const [W, D, H] = binSize; // env: X=width, Y=depth, Z=height(up)
+
+  // container wireframe (p5 box order: width (X), height (Y), depth (Z))
+  // we want p5 Y to represent env Z (height). So we draw a p5 box sized [W, H, D]
+  stroke(60);
   noFill();
   push();
-    box(binSize[0], binSize[1], binSize[2]);
+    box(W, H, D);
   pop();
 
-  // floor on XZ at bottom (y = -binSize[1]/2)
+  // floor at bottom: p5 Y grows downward, so bottom plane is at +H/2 in p5-coords
   noStroke();
   push();
-    translate(0, -0.5 * binSize[1], 0);
-    rotateX(HALF_PI);                // XY plane -> XZ plane
-    ambientMaterial(210, 15, 95);    // HSB: bluish floor (low saturation)
-    plane(binSize[0], binSize[2]);   // width=X, height=Z
+    translate(0, +0.5 * H, 0);  // move to bottom
+    rotateX(HALF_PI);           // put plane in XZ
+    ambientMaterial(210, 15, 95);
+    plane(W, D);
   pop();
 
-  // placed boxes — each with a distinct hue
+  // placed boxes — map env (x,y,z) corner + (w,l,h) dims to p5 center coords
+  // env: x in [0,W], y in [0,D], z in [0,H], where z is UP
   for (let i = 0; i < boxes.length; i++) {
     const b = boxes[i];
-    const [w,l,h] = b.dim;
-    const [x,y,z] = b.pos;
+    const [w, l, h] = b.dim;    // env dims: w (X), l (Y=depth), h (Z=up)
+    const [x, y, z] = b.pos;    // env pos is MIN corner: (x,y,z)
 
-    // env corner coords -> p5 centered coords
-    const cx = -0.5*binSize[0] + 0.5*w + x;
-    const cy = -0.5*binSize[1] + 0.5*l + y;
-    const cz = -0.5*binSize[2] + 0.5*h + z;
+    // Convert env corner -> p5 center coordinate system (origin centered)
+    // X: center at -W/2 .. +W/2
+    const cx = -0.5 * W + x + 0.5 * w;
 
-    // cycle hue by index; 47 gives a nice spread
+    // Y (p5) should represent env Z (height ↑). p5 +Y goes DOWN the screen, so flip it:
+    // top (env z = H) should be p5 y = -H/2; bottom (env z = 0) -> p5 y = +H/2
+    const cy = +0.5 * H - (z + 0.5 * h);
+
+    // Z (p5 depth) should represent env Y (depth). Center at -D/2 .. +D/2
+    const cz = -0.5 * D + y + 0.5 * l;
+
+    // give distinct hues
     const hue = (i * 47) % 360;
 
     push();
       translate(cx, cy, cz);
-      // use ambientMaterial so colors show with lighting
-      ambientMaterial(hue, 70, 95);  // vivid colored boxes
-      box(w, l, h);
+      ambientMaterial(hue, 70, 95);
+      // IMPORTANT: p5 box order is (width=X, height=Y, depth=Z) -> map dims to (w, h, l)
+      box(w, h, l);
     pop();
   }
+
+  
 }
+
 </script>
+<img id="hmap" style="max-width:300px;border:1px solid #ccc;display:none;margin-top:12px;" />
+<img id="emsView" style="max-width:300px;border:1px solid #ccc;display:none;margin-top:12px;" />
 </body>
 </html>

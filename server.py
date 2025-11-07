@@ -1,11 +1,19 @@
 # serve_packing_api.py
 import os, sys, time, uuid
 from typing import List, Optional, Dict, Any
-import numpy as np
+import io, base64, numpy as np
+import io, base64
 import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+import matplotlib
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+
 
 from types import SimpleNamespace as NS
 import uuid
@@ -13,6 +21,117 @@ import uuid
 from tianshou.data import Batch
 from tianshou.data import Batch, to_torch
 
+from threading import Lock
+SESS_LOCKS: dict[str, Lock] = {}
+
+def _get_lock(session_id: str) -> Lock:
+    if session_id not in SESS_LOCKS:
+        SESS_LOCKS[session_id] = Lock()
+    return SESS_LOCKS[session_id]
+
+
+def _heightmap_png_b64(env, title="Heightmap"):
+    
+    hm = getattr(env.container, "heightmap", None)
+    if hm is None:
+        return None
+    hm = np.array(hm)
+    fig, ax = plt.subplots(figsize=(5,4))
+    im = ax.imshow(hm, cmap="viridis", origin="lower")
+    fig.colorbar(im, ax=ax, label="Height (Z)")
+    ax.set_title(title); ax.set_xlabel("X (width)"); ax.set_ylabel("Y (depth)")
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=120)
+    plt.close(fig)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def visualize_ems_colored(env, box_size, mask_1d, picked=None, title="EMS before placement"):
+    """
+    Draw EMS rectangles color-coded by feasibility given the CURRENT mask.
+    - Green: any valid action for that EMS (no-rot or rot)
+    - Red:   no valid action
+    - Gold outline + ★: picked action (if provided)
+
+    Args:
+      env: your PackingEnv
+      box_size: [w,l,h] of current box
+      mask_1d:  1D numpy array (len K or 2K) with 1/0 valid flags
+      picked:   optional action index a (0..len(mask)-1)
+    Returns:
+      base64 PNG string
+    """
+    hm = np.array(env.container.heightmap)
+    fig, ax = plt.subplots(figsize=(6,5))
+    im = ax.imshow(hm, cmap="viridis", origin="lower")
+    fig.colorbar(im, ax=ax, label="Height (Z)")
+    ax.set_title(f"{title} (current box: {box_size[0]}×{box_size[1]}×{box_size[2]})")
+    ax.set_xlabel("X"); ax.set_ylabel("Y")
+
+    # Pull EMS rectangles. If explicit list missing, fall back to env.candidates (non-zero rows).
+    ems_list = []
+    if hasattr(env.container, "ems_list"):
+        ems_list = list(env.container.ems_list)
+    elif hasattr(env.container, "ems"):
+        ems_list = list(env.container.ems)
+    if not ems_list and hasattr(env, "candidates"):
+        K = getattr(env, "k_placement", len(env.candidates))
+        for row in np.array(env.candidates[:K], dtype=int):
+            x1,y1,z1,x2,y2,z2 = row.tolist()
+            if (x1|y1|z1|x2|y2|z2) == 0:  # zero padding
+                continue
+            ems_list.append([x1,y1,z1,x2,y2,z2])
+
+    K = getattr(env, "k_placement", len(ems_list))
+    mask = np.asarray(mask_1d, dtype=float).reshape(-1)
+    two_halves = (mask.shape[0] == 2 * K)
+
+    # helper: does EMS i have any valid action?
+    def has_valid(i):
+        if i < mask.shape[0] and mask[i] > 0.5:
+            return True
+        if two_halves:
+            j = i + K
+            if j < mask.shape[0] and mask[j] > 0.5:
+                return True
+        return False
+
+    for i, e in enumerate(ems_list):
+        x1, y1, z1, x2, y2, z2 = map(int, e)
+        w, h = x2 - x1, y2 - y1
+        if w <= 0 or h <= 0:
+            continue
+
+        feasible = has_valid(i)
+        face = (0.0, 1.0, 0.0, 0.25) if feasible else (1.0, 0.0, 0.0, 0.20)  # green/red with alpha
+        edge = "none"
+
+        ax.add_patch(Rectangle((x1, y1), w, h, fill=True, facecolor=face, ec=edge, lw=1.0))
+        # label EMS index in contrasting color
+        ax.text(x1 + w/2, y1 + h/2, str(i),
+                ha="center", va="center",
+                color="white" if feasible else "yellow",
+                fontsize=7, weight="bold")
+
+    # Highlight the picked action (if any)
+    if picked is not None:
+        try:
+            pos, rot, dim = env.idx2pos_for(int(picked), box_size)
+            px, py, pz = map(int, pos)
+            dw, dl, dh = map(int, dim)
+            ax.add_patch(Rectangle((px, py), dw, dl, fill=False, ec="gold", lw=2.0))
+            ax.text(px + dw/2, py + dl/2, "★", ha="center", va="center", color="gold", fontsize=10)
+        except Exception:
+            pass
+
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=120)
+    plt.close(fig)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    
 # project imports (light at top, heavy under startup)
 curr_path = os.path.dirname(os.path.abspath(__file__))
 parent_path = os.path.dirname(curr_path)
@@ -45,6 +164,13 @@ class PlaceResp(BaseModel):
     count: int
     done: bool
     boxes: List[Dict[str, Any]]    # all placed boxes so far: {"dim":[w,l,h], "pos":[x,y,z]}
+    debug_hmap_png: Optional[str] = None
+    debug_valid_actions: Optional[List[Dict[str, Any]]] = None
+    debug_mask_len: Optional[int] = None
+    debug_k_placement: Optional[int] = None
+    debug_raw_candidates: Optional[List[List[int]]] = None  # careful: large
+    debug_mask: Optional[List[float]] = None                # careful: large
+    debug_ems_png: Optional[str] = None
 
 class StateResp(BaseModel):
     session_id: str
@@ -267,6 +393,8 @@ def start_session(cfg: StartSessionReq):
         is_render=cfg.render,
     )
 
+    env.api_mode = True
+
     # tie action space now that env exists
     policy.action_space = env.action_space
 
@@ -274,7 +402,7 @@ def start_session(cfg: StartSessionReq):
     sel = SelectableBoxCreator(args.env.container_size, args.env.box_size_set, args.env.rot, seed)
     sel.autofill = False 
     env.box_creator = sel
-    env.reset(seed=seed)
+    env.reset(seed=seed, defer_box=True)
 
     print("[START] env.box_creator type:", type(env.box_creator).__name__)
     print("[START] sel is env.box_creator ?", sel is env.box_creator)
@@ -286,61 +414,131 @@ def start_session(cfg: StartSessionReq):
 
 @app.post("/place", response_model=PlaceResp)
 def place_one(req: PlaceReq):
-    
+    # --- session lookup ---
     if req.session_id not in SESS:
         raise HTTPException(404, detail="Unknown session_id")
-    env = SESS[req.session_id]["env"]
-    sel = SESS[req.session_id]["sel"]
-    policy = SESS[req.session_id]["policy"]
-    device = SESS[req.session_id]["device"]  # cuda or cpu
+    
+    lock = _get_lock(req.session_id)
+    with lock:
+        env    = SESS[req.session_id]["env"]
+        sel    = SESS[req.session_id]["sel"]
+        policy = SESS[req.session_id]["policy"]
+        device = SESS[req.session_id]["device"]
 
-    env._override_next = [int(req.box[0]), int(req.box[1]), int(req.box[2])]
+        forced = (int(req.box[0]), int(req.box[1]), int(req.box[2]))
+        env.force_next_box(forced)
 
-    sel.autofill = False
-    sel.override_current(req.box)
-    print(f"[API] requested={tuple(req.box)} env.next_box={tuple(env.next_box)}")
+        # --- force this exact box for observation + step ---
+        env._override_next = [int(req.box[0]), int(req.box[1]), int(req.box[2])]
+        sel.autofill = False
+        sel.override_current(req.box)
+        
+        
 
-    # 1) Force THIS box for both candidate generation and step
-    env._override_next = [int(req.box[0]), int(req.box[1]), int(req.box[2])]
-    # Do NOT reset or write box_creator here
+        # print(f"[API] requested={tuple(req.box)} env.next_box={tuple(env.next_box)}")
 
-    # 2) Build observation for the forced box
-    # 2) build a single-sample Batch (with correct dtypes + device)
-    cur = env.cur_observation
+        # nb = tuple(env.next_box)
+        # assert nb == tuple(req.box), f"next_box desync: {nb} vs {tuple(req.box)}"
 
-    # obs: float32 on model device
-    obs_t = torch.as_tensor(cur["obs"], dtype=torch.float32, device=device).unsqueeze(0)
+        # --- build current observation (for THIS box) ---
+        cur = env.cur_observation
 
-    # mask: CPU float32 (IMPORTANT: keep it on CPU so FloatTensor(...) is happy)
-    # Option A: numpy
-    mask_np = np.asarray(cur["mask"], dtype=np.float32)[None, ...]
-    # Option B: CPU torch
-    # mask_cpu = torch.as_tensor(cur["mask"], dtype=torch.float32).unsqueeze(0)  # note: no device=...
+        # === SNAPSHOT candidates + mask BEFORE policy/step (this is the key) ===
+        K          = int(env.k_placement)
+        cands_snap = np.array(env.candidates, copy=True)                 # (K,6)
+        mask_now   = np.asarray(cur["mask"], dtype=np.float32).copy()    # (2K,) or (K,)
 
-    batch = Batch(obs={"obs": obs_t, "mask": mask_np})  # or mask_cpu
-    with torch.no_grad():
-        out = policy.forward(batch, state=None)
+        # --- policy forward using the snapshot mask ---
+        obs_t = torch.as_tensor(cur["obs"], dtype=torch.float32, device=device).unsqueeze(0)
+        batch = Batch(obs={"obs": obs_t, "mask": mask_now[None, ...]})
+        with torch.no_grad():
+            out = policy.forward(batch, state=None)
+        a = int(out.act.view(-1)[0].detach().cpu().item())
 
-    a = int(out.act.view(-1)[0].detach().cpu().item())
+        # --- validate chosen action against the SNAPSHOT mask ---
+        if not (0 <= a < mask_now.shape[0]) or mask_now[a] <= 0.5:
+            valid = np.flatnonzero(mask_now > 0.5)
+            if valid.size == 0:
+                raise HTTPException(409, detail="No feasible placement (mask has no valid indices).")
+            if hasattr(out, "logits"):
+                logits = out.logits.detach().cpu().numpy().reshape(-1)
+                a = int(valid[np.argmax(logits[valid])])
+            else:
+                a = int(valid[0])
 
-    # 4) Decode + step (step() will clear _override_next afterwards)
-    # pos, rot, dim = env.idx2pos(a)
-    # _, reward, done, truncated, info = env.step(a)
+        # --- decode using the SNAPSHOT (no dependence on env after step) ---
+        ems_idx      = int(a % K)
+        rot_expected = 1 if a >= K else 0
+        if ems_idx >= cands_snap.shape[0]:
+            raise HTTPException(500, detail="EMS index out of range (snapshot).")
 
-    pos, rot, dim = env.idx2pos_for(a, req.box)
-    _, reward, done, truncated, info = env.step_with_box(a, req.box)
+        x1, y1, z1, x2, y2, z2 = map(int, cands_snap[ems_idx])
+        w, l, h = map(int, req.box)
+        if rot_expected:
+            dw, dl, dh = l, w, h
+        else:
+            dw, dl, dh = w, l, h
+        pos_dec = (x1, y1, z1)
+        dim_dec = (dw, dl, dh)
 
-    return PlaceResp(
-        session_id=req.session_id,
-        placed_dim=[int(d) for d in dim],
-        pos=[int(p) for p in pos],
-        rot=int(rot),
-        filled_ratio=float(info.get("ratio", 0.0)),
-        count=int(info.get("counter", 0)),
-        done=bool(done or truncated),
-        boxes=_boxes_list(env),
-    )
+        # --- hard bounds guard using container dims ---
+        X, Y, Z = map(int, env.container.dimension)
+        px, py, pz = pos_dec
+        if not (0 <= px and 0 <= py and 0 <= pz and px+dw <= X and py+dl <= Y and pz+dh <= Z):
+            # quick rescue: try the other half if valid in SNAPSHOT
+            other = a + K if a < K else a - K
+            if 0 <= other < mask_now.shape[0] and mask_now[other] > 0.5:
+                a = int(other)
+                ems_idx      = int(a % K)
+                rot_expected = 1 if a >= K else 0
+                x1, y1, z1, x2, y2, z2 = map(int, cands_snap[ems_idx])
+                dw, dl = (l, w) if rot_expected else (w, l)
+                pos_dec = (x1, y1, z1)
+                dim_dec = (dw, dl, h)
+                px, py, pz = pos_dec
+            if not (0 <= px and 0 <= py and 0 <= pz and px+dw <= X and py+dl <= Y and pz+dh <= Z):
+                raise HTTPException(409, detail="Decoded placement out of bounds (snapshot).")
 
+        # --- optional cross-check: idx2pos_for agrees with snapshot decode? ---
+        pos_chk, rot_chk, dim_chk = env.idx2pos_for(a, req.box)
+        if (tuple(map(int, pos_chk)) != pos_dec) or (tuple(map(int, dim_chk)) != tuple(map(int, dim_dec))):
+            print(f"[WARN] idx2pos_for disagrees with snapshot decode: "
+                f"snapshot pos={pos_dec} dim={dim_dec} | "
+                f"idx2pos pos={tuple(map(int,pos_chk))} dim={tuple(map(int,dim_chk))}, a={a}, K={K}")
+
+        # --- step the env exactly once (env will rebuild cands AFTER this) ---
+        _, reward, done, truncated, info = env.step_with_box(a, req.box)
+
+        # --- EMS BEFORE placement (color-coded) built with the SNAPSHOT mask ---
+        ems_png = visualize_ems_colored(env, req.box, mask_now, picked=a,
+                                        title="EMS before placement")
+
+        # --- heightmap AFTER placement ---
+        png = _heightmap_png_b64(env, title=f"Heightmap after placement #{info.get('counter','?')}")
+
+        # --- debug prints for alignment (use SNAPSHOT EMS; not post-step) ---
+        print(f"[EMS DEBUG] Using SNAPSHOT EMS #{ems_idx}: ({x1},{y1},{z1})–({x2},{y2},{z2}), "
+            f"picked a={a}, rot_expected={rot_expected}")
+        print(f"[EMS DEBUG] Placed box pos={pos_dec}, dim={dim_dec}")
+
+        # --- response ---
+        return PlaceResp(
+            session_id=req.session_id,
+            placed_dim=[int(d) for d in dim_dec],         # from snapshot decode
+            pos=[int(p) for p in pos_dec],                # from snapshot decode
+            rot=int(rot_expected),
+            filled_ratio=float(info.get("ratio", 0.0)),
+            count=int(info.get("counter", 0)),
+            done=bool(done or truncated),
+            boxes=_boxes_list(env),
+            debug_hmap_png=png,
+            debug_k_placement=int(K),
+            debug_mask_len=int(mask_now.shape[0]),
+            debug_raw_candidates=cands_snap.tolist(),     # snapshot, not post-step
+            debug_mask=mask_now.astype(float).tolist(),   # snapshot, not post-step
+            debug_ems_png=ems_png,
+            debug_valid_actions=None,
+        )
 
 @app.get("/state/{session_id}", response_model=StateResp)
 def get_state(session_id: str):
