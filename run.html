@@ -2,33 +2,175 @@
 <html>
 <head>
   <meta charset="utf-8" />
+  <title>3D Bin Packing – Online + Offline</title>
+  <link rel="stylesheet" href="app.css" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
 </head>
 <body>
 
-<select id="boxSel">
-  <option value="2,2,2">2×2×2</option>
-  <option value="2,3,4">2×3×4</option>
-  <option value="3,3,2">3×3×2</option>
-  <option value="4,2,2">4×2×2</option>
-  <option value="5,3,2">5×3×2</option>
-  <option value="3,5,4">3×5×4</option>
-  <option value="6,2,3">6×2×3</option>
-</select>
-<button id="start">Start</button>
-<button id="place">Place</button>
+<div class="row">
+  <div class="col card">
+    <div>
+      <select id="boxSel">
+        <option value="2,2,2">2×2×2</option>
+        <option value="2,3,4">2×3×4</option>
+        <option value="3,3,2">3×3×2</option>
+        <option value="4,2,2">4×2×2</option>
+        <option value="5,3,2">5×3×2</option>
+        <option value="3,5,4">3×5×4</option>
+        <option value="6,2,3">6×2×3</option>
+      </select>
+    </div>
+
+    <div class="stack-8">
+      <button id="start">Start</button>
+      <button id="place">Place (online)</button>
+    </div>
+
+    <div class="col">
+      <div class="muted">Session: <span id="sid" class="code">—</span></div>
+      <div class="muted">Count: <span id="count">0</span> · Ratio: <span id="ratio">0.000</span></div>
+    </div>
+  </div>
+
+  <div class="col card">
+    <div><b>Offline list</b> <span class="muted">(one [w,l,h] per line)</span></div>
+    <textarea id="offlineList" placeholder="[4,2,2]
+[3,5,4]
+[2,3,4]"></textarea>
+    <div class="stack-8">
+      <button id="placeMany">Offline: place many</button>
+      <label class="pill"><input type="checkbox" id="stopOnFail" checked> stop on fail</label>
+    </div>
+    <div id="offlineSummary" class="muted"></div>
+  </div>
+
+  <div class="col card">
+    <div><b>Debug views</b></div>
+    <div class="debug-wrap">
+      <div class="debug-box">
+        <div class="muted">Heightmap</div>
+        <img id="hmap" alt="Heightmap" class="debug-img"
+        src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+XnX8AAAAASUVORK5CYII=" />
+      </div>
+      <div class="debug-box">
+        <div class="muted">EMS candidates</div>
+        <img id="emsView" alt="EMS candidates" class="debug-img"
+        src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+XnX8AAAAASUVORK5CYII=" />
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row" style="margin-top:16px;">
+  <div class="col card canvas-card">
+    <div><b>3D view</b> <span class="muted">drag to orbit</span></div>
+    <div id="p5mount"></div>
+  </div>
+</div>
 
 <script>
 let SESSION_ID = null;
 let boxes = [];
 const binSize = [10,10,10];
 
+let LAST_HMAP = null;
+let LAST_EMS  = null;
+
+const sidEl   = document.getElementById("sid");
+const countEl = document.getElementById("count");
+const ratioEl = document.getElementById("ratio");
+
 document.getElementById("start").onclick = startSession;
 document.getElementById("place").onclick = () => {
   const parts = document.getElementById("boxSel").value.split(",").map(s => +s.trim());
-  const [w, l, h] = parts;
-  placeBox(w, l, h);
+  placeBox(parts[0], parts[1], parts[2]);
 };
+document.getElementById("placeMany").onclick = placeMany;
+
+async function refreshState() {
+  if (!SESSION_ID) return null;
+  const res = await fetch(`http://127.0.0.1:8000/state/${SESSION_ID}`);
+  if (!res.ok) return null;
+  const data = await res.json();
+  if (Array.isArray(data.boxes)) boxes = normalizeBoxesForViewer(data.boxes || []);
+  setStats(data);
+  // If you chose Option A (loop always), you don't need redrawScene().
+  // If you kept noLoop(), keep this line:
+  if (p5instance) p5instance.redraw();
+  return data;
+}
+
+function setStats(data) {
+  if (!data) return;
+  countEl.textContent = (data.count ?? boxes.length);
+  ratioEl.textContent = (data.filled_ratio ?? 0).toFixed(3);
+}
+
+function sanitizeBoxes(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map(b => ({
+    dim: (b.dim || []).map(Number),
+    pos: (b.pos || []).map(Number),
+  }));
+}
+
+// Use the same bin size you render with
+const BIN_W = binSize[0], BIN_L = binSize[1], BIN_H = binSize[2];
+
+function inBounds(dim, pos) {
+  if (!dim || !pos) return false;
+  const [W,L,H] = dim.map(Number);
+  const [x,y,z] = pos.map(Number);
+  return (
+    Number.isFinite(W) && Number.isFinite(L) && Number.isFinite(H) &&
+    Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z) &&
+    W > 0 && L > 0 && H > 0 &&
+    x >= 0 && y >= 0 && z >= 0 &&
+    x + W <= BIN_W && y + L <= BIN_L && z + H <= BIN_H
+  );
+}
+
+function normalizeOneBox(b) {
+  if (!b || !Array.isArray(b.dim) || !Array.isArray(b.pos)) return null;
+  const d = b.dim.map(Number);
+  const p = b.pos.map(Number);
+  if (d.length !== 3 || p.length !== 3) return null;
+
+  // Option A: assume as-is is [W,L,H]
+  const asIs = [d[0], d[1], d[2]];
+  // Option B: swap W/L -> [L,W,H]
+  const swapped = [d[1], d[0], d[2]];
+
+  // Prefer the one that fits inside the bin
+  if (inBounds(asIs, p) && !inBounds(swapped, p)) return { dim: asIs, pos: p };
+  if (inBounds(swapped, p) && !inBounds(asIs, p)) return { dim: swapped, pos: p };
+
+  // If both fit (or neither), keep as-is to not disturb online placements
+  return { dim: asIs, pos: p };
+}
+
+function normalizeBoxesForViewer(list) {
+  if (!Array.isArray(list)) return [];
+  const normalized = [];
+  for (const b of list) {
+    const nb = normalizeOneBox(b);
+    if (nb) normalized.push(nb);
+  }
+
+  // Debug aid: log how many we kept
+  // console.log("normalizeBoxesForViewer: kept", normalized.length, "of", list.length);
+  return normalized;
+}
+
+function assignBoxesFromServerPayload(payload, where) {
+  const before = boxes.length;
+  boxes = normalizeBoxesForViewer(payload || []);
+  console.log(`[${where}] boxes set:`, before, "->", boxes.length);
+  if (boxes[0]) console.log(`[${where}] first box`, boxes[0]);
+  if (p5instance) p5instance.redraw();
+}
+
 
 async function startSession() {
   const res = await fetch("http://127.0.0.1:8000/session/start", {
@@ -49,8 +191,10 @@ async function startSession() {
   }
   const data = await res.json();
   SESSION_ID = data.session_id;
-  boxes = data.boxes || [];
-  console.log("started session", SESSION_ID);
+  sidEl.textContent = SESSION_ID;
+  assignBoxesFromServerPayload(data.boxes, "startSession");
+  setStats(data);
+  redrawScene();
 }
 
 async function placeBox(w, l, h) {
@@ -63,102 +207,213 @@ async function placeBox(w, l, h) {
   const txt = await res.text();
   if (!res.ok) { console.error("place error:", res.status, txt); return; }
   const data = JSON.parse(txt);
-  console.log("place resp:", data);
-  
-  // ✅ replace (not stack) the heightmap image
-  const hmap = document.getElementById("hmap");
-  if (data.debug_hmap_png) {
-    hmap.src = "data:image/png;base64," + data.debug_hmap_png;
-    hmap.alt = "Heightmap";
-    hmap.style.display = "";            // show it
-  } else {
-    hmap.style.display = "none";        // hide if none returned
-  }
-  console.log('has ems png?', !!data.debug_ems_png, data.debug_ems_png?.slice(0,40));
-  // after parsing `data`
-  const ems = document.getElementById("emsView");
-  if (data.debug_ems_png) {
-    ems.src = "data:image/png;base64," + data.debug_ems_png;
-    ems.alt = "EMS candidates";
-    ems.style.display = "";     // <- SHOW IT
-  } else {
-    ems.style.display = "none"; // <- HIDE IF MISSING
-  }
-
+  applyDebugImages(data);
   if (Array.isArray(data.boxes) && data.boxes.length > 0) {
-    boxes = data.boxes; // server provided full list
+    assignBoxesFromServerPayload(data.boxes, "startSession");
   } else {
-    boxes.push({ dim: data.placed_dim, pos: data.pos });
+    boxes.push({ dim: (data.placed_dim||[]).map(Number), pos: (data.pos||[]).map(Number) });
   }
+  setStats(data);
+  redrawScene();
 }
 
-function setup() {
-  createCanvas(800, 600, WEBGL);
-  colorMode(HSB, 360, 100, 100); // allow hue cycling
+function parseOfflineList(raw) {
+  // Accept either JSON-ish lines or CSV-like [w,l,h] lines
+  const lines = raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const out = [];
+  for (const line of lines) {
+    try {
+      // Try JSON first (e.g., [4,2,2])
+      const maybe = JSON.parse(line);
+      if (Array.isArray(maybe) && maybe.length === 3) {
+        out.push(maybe.map(x => +x));
+        continue;
+      }
+    } catch (e) {}
+    // Try simple "w,l,h"
+    if (/^\s*\d+\s*,\s*\d+\s*,\s*\d+\s*$/.test(line)) {
+      out.push(line.split(",").map(s => +s.trim()));
+      continue;
+    }
+    throw new Error("Cannot parse line: " + line);
+  }
+  return out;
 }
 
-function draw() {
-  background(245);
-  orbitControl();
-  scale(20);
+async function placeMany() {
+  if (!SESSION_ID) { console.error("No session — click Start first"); return; }
+  const raw = document.getElementById("offlineList").value;
+  let list;
+  try {
+    list = parseOfflineList(raw);
+  } catch (e) {
+    alert(e.message);
+    return;
+  }
+  const stopOnFail = document.getElementById("stopOnFail").checked;
+  const res = await fetch("http://127.0.0.1:8000/offline/place_many", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: SESSION_ID,
+      boxes: list,
+      stop_on_fail: stopOnFail,
+      return_debug: true
+    })
+  });
+  const txt = await res.text();
+  if (!res.ok) { console.error("offline place_many error:", res.status, txt); return; }
+  const data = JSON.parse(txt);
 
-  // lights
-  ambientLight(128);
-  directionalLight(255, 255, 255, 0.5, 0.5, -1);
+  // Update debug panes from the last step (if provided)
+  applyDebugImages(data);
 
-  const [W, D, H] = binSize; // env: X=width, Y=depth, Z=height(up)
-
-  // container wireframe (p5 box order: width (X), height (Y), depth (Z))
-  // we want p5 Y to represent env Z (height). So we draw a p5 box sized [W, H, D]
-  stroke(60);
-  noFill();
-  push();
-    box(W, H, D);
-  pop();
-
-  // floor at bottom: p5 Y grows downward, so bottom plane is at +H/2 in p5-coords
-  noStroke();
-  push();
-    translate(0, +0.5 * H, 0);  // move to bottom
-    rotateX(HALF_PI);           // put plane in XZ
-    ambientMaterial(210, 15, 95);
-    plane(W, D);
-  pop();
-
-  // placed boxes — map env (x,y,z) corner + (w,l,h) dims to p5 center coords
-  // env: x in [0,W], y in [0,D], z in [0,H], where z is UP
-  for (let i = 0; i < boxes.length; i++) {
-    const b = boxes[i];
-    const [w, l, h] = b.dim;    // env dims: w (X), l (Y=depth), h (Z=up)
-    const [x, y, z] = b.pos;    // env pos is MIN corner: (x,y,z)
-
-    // Convert env corner -> p5 center coordinate system (origin centered)
-    // X: center at -W/2 .. +W/2
-    const cx = -0.5 * W + x + 0.5 * w;
-
-    // Y (p5) should represent env Z (height ↑). p5 +Y goes DOWN the screen, so flip it:
-    // top (env z = H) should be p5 y = -H/2; bottom (env z = 0) -> p5 y = +H/2
-    const cy = +0.5 * H - (z + 0.5 * h);
-
-    // Z (p5 depth) should represent env Y (depth). Center at -D/2 .. +D/2
-    const cz = -0.5 * D + y + 0.5 * l;
-
-    // give distinct hues
-    const hue = (i * 47) % 360;
-
-    push();
-      translate(cx, cy, cz);
-      ambientMaterial(hue, 70, 95);
-      // IMPORTANT: p5 box order is (width=X, height=Y, depth=Z) -> map dims to (w, h, l)
-      box(w, h, l);
-    pop();
+  // Prefer server 'boxes'; if empty, fall back to 'placed'; otherwise fetch /state
+  if (Array.isArray(data.boxes) && data.boxes.length > 0) {
+    boxes = normalizeBoxesForViewer(data.boxes);
+    console.log("[offline] using data.boxes:", boxes.length, "items");
+    if (p5instance) p5instance.redraw();
+  } else if (Array.isArray(data.placed) && data.placed.length > 0) {
+    // map [{box:[w,l,h], pos:[x,y,z], dim:[dw,dl,dh]}] -> viewer expects {dim,pos}
+    boxes = normalizeBoxesForViewer(
+      data.placed.map(({ dim, pos }) => ({ dim, pos }))
+    );
+    console.log("[offline] using data.placed:", boxes.length, "items");
+    if (p5instance) p5instance.redraw();
+  } else {
+    console.log("[offline] neither boxes nor placed present; fetching /state …");
+    await refreshState();
   }
 
-  
+  // Show a tiny summary
+  const sum = document.getElementById("offlineSummary");
+  const placedCount = (data.placed || []).length;
+  const failedCount = (data.failed || []).length;
+  let msg = `<span class="pill good">${placedCount} placed</span>`;
+  if (failedCount > 0) msg += ` <span class="pill bad">${failedCount} failed</span>`;
+  if (data.failed && data.failed.length > 0) {
+    const first = data.failed[0];
+    msg += `<div class="muted">First fail: <span class="code">[${first.box.join(",")}]</span> — ${first.reason}</div>`;
+  }
+  sum.innerHTML = msg;
 }
 
+function attachLogging(imgEl, name) {
+  // Remove old handlers to avoid multiple logs
+  imgEl.onload = null;
+  imgEl.onerror = null;
+  imgEl.onload = () => console.log(`[img:${name}] onload size ${imgEl.naturalWidth}×${imgEl.naturalHeight}`);
+  imgEl.onerror = (e) => console.error(`[img:${name}] onerror`, e);
+}
+
+function setB64(imgEl, name, b64) {
+  if (!b64) return false;
+  const clean = String(b64).replace(/\s+/g, "");     // strip newlines / spaces
+  if (!clean) return false;
+  attachLogging(imgEl, name);
+  // Force a refresh even if the string is the same
+  imgEl.src = "";
+  // Next tick to ensure browsers re-paint
+  setTimeout(() => {
+    imgEl.src = "data:image/png;base64," + clean;
+  }, 0);
+  return true;
+}
+
+function applyDebugImages(data) {
+  const hmapEl = document.getElementById("hmap");
+  const emsEl  = document.getElementById("emsView");
+  if (!hmapEl || !emsEl) {
+    console.warn("[debug imgs] img elements not found");
+    return;
+  }
+
+  let updatedHmap = false, updatedEms = false;
+
+  if (data && data.debug_hmap_png) {
+    LAST_HMAP = data.debug_hmap_png;
+    updatedHmap = setB64(hmapEl, "hmap", LAST_HMAP);
+  }
+  if (data && data.debug_ems_png) {
+    LAST_EMS = data.debug_ems_png;
+    updatedEms = setB64(emsEl, "ems", LAST_EMS);
+  }
+
+  // If no new images this turn, keep showing the last known ones
+  if (!updatedHmap && LAST_HMAP) setB64(hmapEl, "hmap", LAST_HMAP);
+  if (!updatedEms  && LAST_EMS)  setB64(emsEl,  "ems",  LAST_EMS);
+
+  console.log("[debug imgs] hmap:", !!LAST_HMAP, "ems:", !!LAST_EMS);
+}
+
+function uiToEnvDim(dimUI) {
+  // convert [W,L,H] -> [L,W,H]
+  return [dimUI[1], dimUI[0], dimUI[2]];
+}
+
+
+/* ------------ p5 renderer (unchanged mapping) ------------- */
+let p5instance = null;
+function redrawScene() {
+  if (!p5instance) return;
+  p5instance.redraw(); // calls draw() once (we'll use noLoop)
+}
+
+new p5((p) => {
+  p.setup = function() {
+    const c = p.createCanvas(800, 600, p.WEBGL);
+    c.parent(document.getElementById("p5mount"));
+    p.colorMode(p.HSB, 360, 100, 100);
+    p.noLoop(); // redraw only on state changes
+    c.mouseOver(() => p.loop());
+    c.mouseOut(() => p.noLoop());
+  };
+
+  p.draw = function() {
+    p.background(245);
+    p.orbitControl();
+    p.scale(20);
+
+    // lights
+    p.ambientLight(128);
+    p.directionalLight(255, 255, 255, 0.5, 0.5, -1);
+
+    const [W, D, H] = binSize; // env: X=width, Y=depth, Z=height(up)
+
+    // container wireframe (p5 box: width=X, height=Y, depth=Z). map env -> (W, H, D)
+    p.stroke(60); p.noFill();
+    p.push(); p.box(W, H, D); p.pop();
+
+    // floor at bottom (env z=0 => p5 y=+H/2)
+    p.noStroke();
+    p.push();
+      p.translate(0, +0.5 * H, 0);
+      p.rotateX(p.HALF_PI);
+      p.ambientMaterial(210, 15, 95);
+      p.plane(W, D);
+    p.pop();
+
+    // placed boxes
+    for (let i = 0; i < boxes.length; i++) {
+      const b = boxes[i];
+      const [w, l, h] = b.dim;    // env dims
+      const [x, y, z] = b.pos;    // env min corner
+
+      const cx = -0.5 * W + x + 0.5 * w;
+      const cy = +0.5 * H - (z + 0.5 * h); // flip for p5 Y
+      const cz = -0.5 * D + y + 0.5 * l;
+
+      const hue = (i * 47) % 360;
+      p.push();
+        p.translate(cx, cy, cz);
+        p.ambientMaterial(hue, 70, 95);
+        p.box(w, h, l); // p5 box: (width=X, height=Y, depth=Z)
+      p.pop();
+    }
+  };
+
+  p5instance = p;
+}, document.getElementById("p5mount"));
 </script>
-<img id="hmap" style="max-width:300px;border:1px solid #ccc;display:none;margin-top:12px;" />
-<img id="emsView" style="max-width:300px;border:1px solid #ccc;display:none;margin-top:12px;" />
 </body>
 </html>

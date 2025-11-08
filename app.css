@@ -1,0 +1,159 @@
+/* ------------- CSS reset-ish ------------- */
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  padding: 16px;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  color: #0f172a;               /* slate-900 */
+  background: #f8fafc;          /* slate-50 */
+}
+
+/* ------------- Layout ------------- */
+.row {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.col {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 260px;
+}
+
+.card {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 12px;
+  box-shadow:
+    0 1px 1px rgba(0,0,0,.02),
+    0 2px 4px rgba(0,0,0,.03);
+}
+
+/* group */
+.stack-8 { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ------------- Type & helpers ------------- */
+.muted { color: #64748b; font-size: 12px; }
+.code  { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+.pill  {
+  display: inline-block; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid #e2e8f0; font-size: 12px; background: #fff;
+}
+.pill.good { background: #e6ffed; border-color: #b7ebc6; }
+.pill.bad  { background: #fff1f0; border-color: #ffccc7; }
+
+/* ------------- Form controls ------------- */
+select, textarea, input[type="text"] {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  color: inherit;
+  outline: none;
+}
+select:focus, textarea:focus, input[type="text"]:focus {
+  border-color: #94a3b8;        /* slate-400 */
+  box-shadow: 0 0 0 4px rgba(148,163,184,.15);
+}
+
+textarea {
+  height: 160px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  resize: vertical;
+}
+
+/* ------------- Buttons ------------- */
+button {
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid #0f172a;
+  background: #0f172a;
+  color: #fff;
+  cursor: pointer;
+  transition: transform .02s ease, box-shadow .15s ease, opacity .15s ease;
+}
+button:hover { box-shadow: 0 4px 12px rgba(2,6,23,.18); }
+button:active { transform: translateY(1px); }
+button:disabled { opacity: .6; cursor: not-allowed; }
+
+/* ------------- Debug images ------------- */
+.debug-wrap { display: flex; gap: 12px; flex-wrap: wrap; }
+.debug-box { display: flex; flex-direction: column; gap: 6px; }
+
+.debug-img {
+  display: block;                /* JS toggles style="display:none" when needed */
+  max-width: 200px;
+  max-height: 150px;
+  width: auto;
+  height: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fafafa;
+  object-fit: contain;
+  padding: 4px;
+}
+
+/* ------------- P5 container ------------- */
+.canvas-card { width: 100%; }
+#p5mount {
+  min-width: 320px;
+  min-height: 320px;
+}
+
+/* ------------- Responsive ------------- */
+@media (max-width: 900px) {
+  .debug-img { max-width: 160px; max-height: 120px; }
+}
+@media (max-width: 600px) {
+  body { padding: 12px; }
+  .row { gap: 12px; }
+}
+
+/* ------------- Optional dark mode ------------- */
+@media (prefers-color-scheme: dark) {
+  body { background: #0b1220; color: #e6edf6; }
+  .card { background: #0f172a; border-color: #1f2937; box-shadow: none; }
+  select, textarea, input[type="text"] {
+    background: #0b1220; color: #e6edf6; border-color: #1f2937;
+  }
+  button { background: #e6edf6; color: #0b1220; border-color: #e6edf6; }
+  .muted { color: #93a4bd; }
+  .debug-img { background: #0b1220; border-color: #1f2937; }
+}
+
+/* --- progress bar --- */
+.progress {
+  width: 100%;
+  max-width: 220px;
+  height: 10px;
+  background: #f1f5f9;           /* slate-100 */
+  border: 1px solid #e5e7eb;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.progress-bar {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #22c55e, #16a34a); /* green */
+  transition: width .25s ease;
+}
+
+/* make debug images consistent size */
+.debug-img {
+  display: block;
+  max-width: 200px;
+  max-height: 150px;
+  width: auto;
+  height: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;           /* white so placeholder blends cleanly */
+  object-fit: contain;
+  padding: 4px;
+}

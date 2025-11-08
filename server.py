@@ -8,6 +8,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from tools import registration_envs, set_seed, CategoricalMasked
+import arguments
+
 import matplotlib
 matplotlib.use("Agg")
 
@@ -137,8 +140,94 @@ curr_path = os.path.dirname(os.path.abspath(__file__))
 parent_path = os.path.dirname(curr_path)
 sys.path.append(parent_path)
 
-from tools import registration_envs, set_seed, CategoricalMasked
-import arguments
+def _policy_place_one(env, policy, device, req_box):
+    """
+    Exactly the same 'snapshot -> forward -> decode -> step_with_box' pipeline you use in /place,
+    but as a reusable helper. Returns (pos_dec, dim_dec, rot_expected, info, mask_now, cands_snap).
+    Raises HTTPException if no feasible placement.
+    """
+    forced = (int(req_box[0]), int(req_box[1]), int(req_box[2]))
+    # Authoritatively set current box
+    if hasattr(env, "force_next_box"):
+        env.force_next_box(forced)
+    # For creators that keep a queue:
+    if hasattr(env, "box_creator") and hasattr(env.box_creator, "override_current"):
+        env.box_creator.override_current(req_box)
+    if hasattr(env, "api_mode"):
+        env.api_mode = True
+
+    # Build obs for THIS box
+    cur = env.cur_observation
+
+    # SNAPSHOT candidates + mask BEFORE policy/step
+    K = int(env.k_placement)
+    cands_snap = np.array(env.candidates, copy=True)
+    mask_now   = np.asarray(cur["mask"], dtype=np.float32).copy()
+
+    # Policy forward
+    obs_t = torch.as_tensor(cur["obs"], dtype=torch.float32, device=device).unsqueeze(0)
+    batch = Batch(obs={"obs": obs_t, "mask": mask_now[None, ...]})
+    with torch.no_grad():
+        out = policy.forward(batch, state=None)
+    a = int(out.act.view(-1)[0].detach().cpu().item())
+
+    # Validate vs snapshot mask
+    if not (0 <= a < mask_now.shape[0]) or mask_now[a] <= 0.5:
+        valid = np.flatnonzero(mask_now > 0.5)
+        if valid.size == 0:
+            raise HTTPException(409, detail="No feasible placement (mask has no valid indices).")
+        if hasattr(out, "logits"):
+            logits = out.logits.detach().cpu().numpy().reshape(-1)
+            a = int(valid[np.argmax(logits[valid])])
+        else:
+            a = int(valid[0])
+
+    # Decode with snapshot
+    ems_idx      = int(a % K)
+    rot_expected = 1 if a >= K else 0
+    if ems_idx >= cands_snap.shape[0]:
+        raise HTTPException(500, detail="EMS index out of range (snapshot).")
+
+    x1, y1, z1, x2, y2, z2 = map(int, cands_snap[ems_idx])
+    w, l, h = map(int, req_box)
+    if rot_expected:
+        dw, dl, dh = l, w, h
+    else:
+        dw, dl, dh = w, l, h
+    pos_dec = (x1, y1, z1)
+    dim_dec = (dw, dl, dh)
+
+    # Bounds guard
+    X, Y, Z = map(int, env.container.dimension)
+    px, py, pz = pos_dec
+    if not (0 <= px and 0 <= py and 0 <= pz and px+dw <= X and py+dl <= Y and pz+dh <= Z):
+        other = a + K if a < K else a - K
+        if 0 <= other < mask_now.shape[0] and mask_now[other] > 0.5:
+            a = int(other)
+            ems_idx      = int(a % K)
+            rot_expected = 1 if a >= K else 0
+            x1, y1, z1, x2, y2, z2 = map(int, cands_snap[ems_idx])
+            dw, dl = (l, w) if rot_expected else (w, l)
+            pos_dec = (x1, y1, z1)
+            dim_dec = (dw, dl, h)
+            px, py, pz = pos_dec
+        if not (0 <= px and 0 <= py and 0 <= pz and px+dw <= X and py+dl <= Y and pz+dh <= Z):
+            raise HTTPException(409, detail="Decoded placement out of bounds (snapshot).")
+
+    # Optional cross-check
+    try:
+        pos_chk, rot_chk, dim_chk = env.idx2pos_for(a, req_box)
+        if (tuple(map(int, pos_chk)) != pos_dec) or (tuple(map(int, dim_chk)) != tuple(map(int, dim_dec))):
+            print(f"[WARN] idx2pos_for disagrees with snapshot decode: "
+                  f"snapshot pos={pos_dec} dim={dim_dec} | "
+                  f"idx2pos pos={tuple(map(int,pos_chk))} dim={tuple(map(int,dim_chk))}, a={a}, K={K}")
+    except Exception:
+        pass
+
+    # Step exactly once
+    _, reward, done, truncated, info = env.step_with_box(a, req_box)
+    return pos_dec, dim_dec, rot_expected, info, mask_now, cands_snap
+
 
 # ---------- Models for requests/responses ----------
 class StartSessionReq(BaseModel):
@@ -177,6 +266,24 @@ class StateResp(BaseModel):
     filled_ratio: float
     count: int
     boxes: List[Dict[str, Any]]
+
+# ---------- Offline models ----------
+class OfflinePlaceManyReq(BaseModel):
+    session_id: str
+    boxes: List[List[int]]             # [[w,l,h], ...]
+    stop_on_fail: bool = True          # stop at first infeasible placement
+    return_debug: bool = True          # include last debug images (heightmap/EMS)
+    seed: Optional[int] = None         # optional deterministic seed for tie-breaking
+
+class OfflinePlaceManyResp(BaseModel):
+    session_id: str
+    placed: List[Dict[str, Any]]       # [{ "box":[w,l,h], "pos":[x,y,z], "rot":0/1, "dim":[dw,dl,dh]}]
+    failed: List[Dict[str, Any]]       # [{ "box":[w,l,h], "reason":"..." }]
+    filled_ratio: float
+    count: int
+    boxes: List[Dict[str, Any]]
+    debug_hmap_png: Optional[str] = None
+    debug_ems_png: Optional[str] = None
 
 # ---------- Selectable creator (so we can inject the current box) ----------
 class SelectableBoxCreator:
@@ -547,3 +654,57 @@ def get_state(session_id: str):
     env = SESS[session_id]["env"]
     ratio = env.container.get_volume_ratio() if hasattr(env.container, "get_volume_ratio") else 0.0
     return StateResp(session_id=session_id, filled_ratio=float(ratio), count=len(_boxes_list(env)), boxes=_boxes_list(env))
+
+
+@app.post("/offline/place_many", response_model=OfflinePlaceManyResp)
+def offline_place_many(req: OfflinePlaceManyReq):
+    if req.session_id not in SESS:
+        raise HTTPException(404, detail="Unknown session_id")
+
+    # Optional deterministic seed for any RNG inside your env (e.g., EMS ordering ties)
+    if req.seed is not None:
+        try:
+            np.random.seed(int(req.seed))
+        except Exception:
+            pass
+
+    lock = _get_lock(req.session_id)
+    with lock:
+        env    = SESS[req.session_id]["env"]
+        policy = SESS[req.session_id]["policy"]
+        device = SESS[req.session_id]["device"]
+
+        placed = []
+        failed = []
+        last_hmap_png = None
+        last_ems_png  = None
+
+        for box in req.boxes:
+            box = [int(box[0]), int(box[1]), int(box[2])]
+            try:
+                pos_dec, dim_dec, rot_expected, info, mask_now, _ = _policy_place_one(env, policy, device, box)
+                # keep last debug if requested
+                if req.return_debug:
+                    last_ems_png  = visualize_ems_colored(env, box, mask_now, picked=None,
+                                                          title="EMS before last offline placement")
+                    last_hmap_png = _heightmap_png_b64(env, title=f"Heightmap after offline #{info.get('counter','?')}")
+                placed.append({
+                    "box": box, "pos": list(map(int, pos_dec)), "rot": int(rot_expected),
+                    "dim": list(map(int, dim_dec))
+                })
+            except HTTPException as e:
+                failed.append({"box": box, "reason": e.detail})
+                if req.stop_on_fail:
+                    break
+
+        ratio = env.container.get_volume_ratio() if hasattr(env.container, "get_volume_ratio") else 0.0
+        return OfflinePlaceManyResp(
+            session_id=req.session_id,
+            placed=placed, failed=failed,
+            filled_ratio=float(ratio),
+            count=len(_boxes_list(env)),
+            boxes=_boxes_list(env),
+            debug_hmap_png=last_hmap_png if req.return_debug else None,
+            debug_ems_png=last_ems_png if req.return_debug else None,
+        )
+
